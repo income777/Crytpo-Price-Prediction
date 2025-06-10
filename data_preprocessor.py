@@ -1,34 +1,38 @@
-
 import requests
 import pandas as pd
-import numpy as np
-from sklearn.preprocessing import MinMaxScaler
+from datetime import datetime, timedelta
 
-def fetch_and_prepare_data(coin_id, horizon_days, window_size=30):
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+# In-memory cache
+_cache = {}
+
+def fetch_coin_data(coin_id):
+    now = datetime.utcnow()
+    cache_key = coin_id
+    if cache_key in _cache:
+        ts, df = _cache[cache_key]
+        if now - ts < timedelta(minutes=1):
+            return df  # use cached data
+
+    # Fetch last 90 days daily history
+    url = f"https://api.coincap.io/v2/assets/{coin_id}/history"
     params = {
-        "vs_currency": "usd",
-        "days": "90",
-        "interval": "daily"
+        "interval": "d1",
+        "start": int((now - timedelta(days=90)).timestamp() * 1000),
+        "end":   int(now.timestamp() * 1000)
     }
-    response = requests.get(url, params=params)
-    if response.status_code != 200:
-        raise ValueError(f"Error fetching data: {response.text}")
+    resp = requests.get(url, params=params)
+    if resp.status_code != 200:
+        raise ValueError(f"CoinCap API error ({resp.status_code}): {resp.text}")
 
-    data = response.json().get("prices", [])
-    df = pd.DataFrame(data, columns=["timestamp", "price"])
-    df["price"] = df["price"].astype(float)
-    df = df[["price"]]
+    data = resp.json().get("data")
+    if not data:
+        raise ValueError(f"No price history for coin_id '{coin_id}'")
 
-    scaler = MinMaxScaler()
-    scaled_data = scaler.fit_transform(df)
+    df = pd.DataFrame(data)
+    df['date'] = pd.to_datetime(df['date'])
+    df = df[['date', 'priceUsd']].rename(columns={'date':'timestamp','priceUsd':'price'})
+    df['price'] = df['price'].astype(float)
+    df = df.set_index('timestamp')
 
-    X, y = [], []
-    for i in range(window_size, len(scaled_data) - horizon_days + 1):
-        X.append(scaled_data[i-window_size:i, 0])
-        y.append(scaled_data[i + horizon_days - 1, 0])
-
-    X, y = np.array(X), np.array(y)
-    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-
-    return X, y, scaler, df["price"].values[-1]
+    _cache[cache_key] = (now, df)
+    return df
